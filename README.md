@@ -181,7 +181,7 @@ Use the existing Upstash database with separate keys for the two kinds of token:
 | `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` | Existing database REST connection; token must allow GET and SET |
 | `TOKEN_STORE_KEY` | Claude OAuth state; keep its current value (default `mcp:garmin:token_store`) |
 | `GARMIN_TOKEN_STORE_KEY` | Garmin DI credentials; default `mcp:garmin:credentials` |
-| `GARMINTOKENS_BASE64` | Initial seed only, generated with the pinned `garminconnect==0.3.6` |
+| `GARMINTOKENS_BASE64` | Initial seed only, generated with the pinned `garminconnect==0.3.9` |
 
 On Render Free, leave `TOKEN_STORE_FILE` unset: a local file would override Redis
 for Claude OAuth and disappear when the service restarts. It does not override
@@ -202,10 +202,22 @@ another Garmin request. Application code adds no replay of Garmin writes; the
 pinned library retains its existing HTTP-401 retry behavior.
 
 The server reports access-token expiry when available; **refresh-token expiry is
-unknown**. Version 0.3.6 uses native DI tokens, not the older Garth OAuth format.
+unknown**. Version 0.3.9 uses native DI tokens, not the older Garth OAuth format.
 There is no background refresh while Render is spun down. Restart recovery can
 refresh a still-valid session on demand; this cannot revive a revoked/expired
 refresh token or bypass MFA or Garmin anti-bot restrictions.
+
+### MFA prompt troubleshooting
+
+The project pins `garminconnect==0.3.9` to include the upstream fix for
+[GH-386](https://github.com/cyberjunky/python-garminconnect/issues/386).
+Version 0.3.6 could treat a normal page titled "GARMIN Authentication
+Application" as an MFA challenge. It could also prompt for an email/SMS code
+without requesting delivery. Version 0.3.9 checks the MFA page variables and
+requests delivery when necessary. An unexpected prompt alone is not evidence
+that your account has authenticator-app MFA enabled. Do not enroll an
+app just to satisfy that prompt. Generate tokens with this project's pinned
+version; never share codes or debug logs containing credentials.
 
 ### Manual reauthentication, only when required
 
