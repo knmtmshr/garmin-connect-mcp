@@ -39,6 +39,8 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse
 
+from garmin_mcp.token_store import _UpstashRedis
+
 logger = logging.getLogger(__name__)
 
 GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
@@ -58,38 +60,6 @@ def _model_to_dict(obj) -> dict:
     if hasattr(obj, "dict"):
         return obj.dict()
     return obj.__dict__
-
-
-class _UpstashRedis:
-    """Minimal synchronous Upstash Redis REST client (no extra dependencies).
-
-    Uses the Upstash command API (POST / with ["CMD", args...]) to avoid
-    JSON double-encoding issues that occur with the /set/{key} endpoint.
-    """
-
-    def __init__(self, url: str, token: str) -> None:
-        self._url   = url.rstrip("/")
-        self._token = token
-
-    def _cmd(self, *args) -> object:
-        with httpx.Client(timeout=5) as client:
-            r = client.post(
-                self._url,
-                headers={
-                    "Authorization": f"Bearer {self._token}",
-                    "Content-Type": "application/json",
-                },
-                content=json.dumps(list(args)),
-            )
-            r.raise_for_status()
-            return r.json().get("result")
-
-    def get(self, key: str) -> str | None:
-        result = self._cmd("GET", key)
-        return result  # None if key doesn't exist
-
-    def set(self, key: str, value: str) -> None:
-        self._cmd("SET", key, value)
 
 
 class _FileStore:
@@ -261,7 +231,7 @@ class GitHubOAuthProvider(OAuthAuthorizationServerProvider):
             "state":        github_state,
         }
         url = GITHUB_AUTHORIZE_URL + "?" + urlencode(github_params)
-        logger.info("Redirecting to GitHub OAuth: %s", url)
+        logger.info("Redirecting to GitHub OAuth")
         return url
 
     # ------------------------------------------------------------------ #
@@ -274,7 +244,7 @@ class GitHubOAuthProvider(OAuthAuthorizationServerProvider):
         error        = request.query_params.get("error")
 
         if error:
-            logger.warning("GitHub OAuth error: %s", error)
+            logger.warning("GitHub OAuth authorization failed")
             return HTMLResponse(f"<h1>Authorization failed</h1><p>GitHub error: {html.escape(error)}</p>", status_code=400)
 
         if not code or not github_state:
@@ -308,7 +278,7 @@ class GitHubOAuthProvider(OAuthAuthorizationServerProvider):
 
         github_access_token = token_data.get("access_token")
         if not github_access_token:
-            logger.error("No access_token in GitHub response: %s", token_data)
+            logger.error("No access token in GitHub response")
             return HTMLResponse("<h1>GitHub error</h1><p>No access token received.</p>", status_code=502)
 
         # Fetch GitHub user and enforce allowlist

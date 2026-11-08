@@ -37,25 +37,25 @@ class TestGarminProxy:
     def test_auth_error_message_is_actionable(self):
         proxy = self._proxy(get_activities=GarminConnectAuthenticationError("expired"))
         exc = pytest.raises(GarminConnectAuthenticationError, proxy.get_activities)
-        assert str(exc.value).startswith("Garmin authentication failed: expired.")
-        assert "Regenerate the Garmin token" in str(exc.value)
+        assert str(exc.value).startswith("GARMIN_AUTH_REJECTED")
+        assert "reauthentication" in str(exc.value)
 
     def test_rate_limit_error_message_is_actionable(self):
         proxy = self._proxy(get_activities=GarminConnectTooManyRequestsError("429"))
         exc = pytest.raises(GarminConnectTooManyRequestsError, proxy.get_activities)
-        assert str(exc.value).startswith("Garmin rate limit hit: 429.")
-        assert "Wait a few minutes" in str(exc.value)
+        assert str(exc.value).startswith("GARMIN_RATE_LIMITED")
+        assert "retry later" in str(exc.value)
 
     def test_connection_error_message_is_actionable(self):
         proxy = self._proxy(get_steps_data=GarminConnectConnectionError("timeout"))
         exc = pytest.raises(GarminConnectConnectionError, proxy.get_steps_data)
-        assert str(exc.value).startswith("Garmin Connect request failed: timeout.")
-        assert "unreachable" in str(exc.value)
+        assert str(exc.value).startswith("GARMIN_CONNECTION_FAILED")
+        assert "retry later" in str(exc.value)
 
     def test_empty_original_message_still_gets_hint(self):
         proxy = self._proxy(get_steps_data=GarminConnectConnectionError())
         exc = pytest.raises(GarminConnectConnectionError, proxy.get_steps_data)
-        assert str(exc.value).startswith("Garmin Connect request failed: unknown error. ")
+        assert str(exc.value).startswith("GARMIN_CONNECTION_FAILED")
 
     def test_unknown_exception_is_re_raised_unchanged(self):
         proxy = self._proxy(get_activities=ValueError("unexpected"))
@@ -105,7 +105,7 @@ class TestGarminProxy:
         proxy = self._proxy(get_activities=GarminConnectAuthenticationError("expired"))
         with pytest.raises(GarminConnectAuthenticationError) as exc:
             proxy.get_activities()
-        assert "Regenerate the Garmin token" in str(exc.value)
+        assert "reauthentication" in str(exc.value)
 
 
 class TestResolveCallTimeout:
