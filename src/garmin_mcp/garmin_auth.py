@@ -1,4 +1,4 @@
-"""DI token persistence for the pinned garminconnect 0.3.6 client.
+"""DI token persistence for the pinned garminconnect 0.3.9 client.
 
 Private refresh/request hooks are intentional: persist rotation before a profile
 fetch can fail or a later request can rotate again. Upgrade with contract tests.
@@ -58,7 +58,7 @@ def safe_error(exc: Exception) -> Exception:
                 if code in {"GARMIN_TOKEN_FORMAT_INVALID", "GARMIN_TOKEN_BASE64_INVALID",
                             "GARMIN_CREDENTIALS_MISSING"}:
                     return GarminConnectAuthenticationError(
-                        f"{code}; provide DI tokens generated with garminconnect 0.3.6"
+                        f"{code}; provide DI tokens generated with garminconnect 0.3.9"
                     )
                 return GarminConnectAuthenticationError("GARMIN_AUTH_REJECTED; reauthentication may be required")
             return GarminConnectConnectionError("GARMIN_REQUEST_FAILED; retry later")
@@ -75,7 +75,7 @@ def _validate_json(raw: str) -> str:
         ):
             raise ValueError
     except Exception:
-        raise GarminConnectAuthenticationError("GARMIN_TOKEN_FORMAT_INVALID; generate tokens with garminconnect 0.3.6") from None
+        raise GarminConnectAuthenticationError("GARMIN_TOKEN_FORMAT_INVALID; generate tokens with garminconnect 0.3.9") from None
     return raw
 
 
