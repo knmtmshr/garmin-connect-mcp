@@ -1,5 +1,3 @@
-import base64
-import datetime
 import logging
 import os
 import sys
@@ -39,6 +37,8 @@ from garmin_mcp import (
     calendar_events,
 )
 from garmin_mcp.github_oauth_provider import GitHubOAuthProvider
+from garmin_mcp.garmin_auth import initialize_garmin, safe_error
+from garmin_mcp.token_store import TokenStoreError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -117,28 +117,12 @@ class _GarminProxy:
 
     2. Error translation: token expiry or rate-limiting during a tool call would
        otherwise surface a raw library traceback. Known Garmin exceptions are
-       re-raised with an actionable hint appended to the original message.
+       translated to fixed messages without response bodies or token values.
     """
-
-    # (prefix, hint): the original exception text is inserted between them so
-    # the real cause is never hidden behind the generic hint.
-    _MESSAGES = {
-        GarminConnectAuthenticationError: (
-            "Garmin authentication failed",
-            "Regenerate the Garmin token (README → Garmin token renewal) and restart the server.",
-        ),
-        GarminConnectTooManyRequestsError: (
-            "Garmin rate limit hit",
-            "Wait a few minutes before retrying.",
-        ),
-        GarminConnectConnectionError: (
-            "Garmin Connect request failed",
-            "Garmin Connect may be unreachable; check your network connection or try again later.",
-        ),
-    }
 
     def __init__(self, client, timeout=None):
         self._client = client
+        self._lock = threading.RLock()
         self._timeout = _resolve_call_timeout() if timeout is None else timeout
 
     def __getattr__(self, name):
@@ -147,15 +131,14 @@ class _GarminProxy:
             return attr
 
         def _invoke(*args, **kwargs):
-            try:
-                return attr(*args, **kwargs)
-            except tuple(self._MESSAGES) as exc:
-                for exc_type, (prefix, hint) in self._MESSAGES.items():
-                    if isinstance(exc, exc_type):
-                        details = str(exc).strip().rstrip(".") or "unknown error"
-                        full_msg = f"{prefix}: {details}. {hint}"
-                        raise type(exc)(full_msg) from None
-                raise
+            # Serialize calls, including any worker that outlives its timeout.
+            # A timed-out mutation may still complete; never replay it here.
+            with self._lock:
+                try:
+                    return attr(*args, **kwargs)
+                except (GarminConnectAuthenticationError, GarminConnectConnectionError,
+                        GarminConnectTooManyRequestsError, TokenStoreError) as exc:
+                    raise safe_error(exc) from None
 
         def _call(*args, **kwargs):
             if not self._timeout:
@@ -181,7 +164,8 @@ class _GarminProxy:
                 raise TimeoutError(
                     f"Garmin request '{name}' did not return within "
                     f"{self._timeout:g}s and was abandoned. This is usually a "
-                    f"transient stall on Garmin's side — please try again. "
+                    f"transient stall. The request may still complete; check "
+                    f"its result before retrying a write. "
                     f"(Adjust with GARMIN_MCP_CALL_TIMEOUT, or set it to 0 to "
                     f"disable the limit.)"
                 )
@@ -326,68 +310,13 @@ def _build_app() -> tuple[FastMCP, GitHubOAuthProvider]:
     return mcp_app, oauth_provider
 
 
-def _log_token_expiry(garmin: Garmin) -> None:
-    try:
-        auth = getattr(garmin, 'garth', None) or getattr(garmin, 'client', None)
-        # Some versions nest the oauth2 token under auth.garth
-        if auth is not None and not hasattr(auth, 'oauth2_token'):
-            auth = getattr(auth, 'garth', auth)
-        token = auth.oauth2_token
-        expires_at = datetime.datetime.fromtimestamp(
-            token.refresh_token_expires_at, tz=datetime.timezone.utc
-        )
-        days_left = (expires_at - datetime.datetime.now(datetime.timezone.utc)).days
-        if token.refresh_expired:
-            logger.error("Garmin refresh token has EXPIRED — all API calls will fail. Regenerate GARMINTOKENS_BASE64.")
-        elif days_left <= 14:
-            logger.warning("Garmin refresh token expires in %d day(s) on %s — regenerate GARMINTOKENS_BASE64 soon.", days_left, expires_at.date())
-        else:
-            logger.info("Garmin refresh token valid until %s (%d days).", expires_at.date(), days_left)
-    except Exception:
-        pass
-
-
 def init_api() -> Garmin:
-    b64 = os.getenv("GARMINTOKENS_BASE64")
-    if b64:
-        logger.info("Trying to login to Garmin Connect using token from environment...")
-        token_json = base64.b64decode(b64).decode("utf-8")
-        garmin = Garmin(is_cn=is_cn)
-        try:
-            garmin.login(token_json)
-        except GarminConnectAuthenticationError as e:
-            logger.error(
-                "Garmin token is expired or invalid (%s). "
-                "Regenerate GARMINTOKENS_BASE64 using: garmin-mcp-auth",
-                e,
-            )
-            sys.exit(1)
-        _log_token_expiry(garmin)
-        logger.info("Login successful using GARMINTOKENS_BASE64.")
-        return garmin
-
-    local = os.path.expanduser("~/.garminconnect")
-    if os.path.isdir(local):
-        logger.info("Using local token files from %s", local)
-        garmin = Garmin(is_cn=is_cn)
-        try:
-            garmin.login(local)
-        except GarminConnectAuthenticationError as e:
-            logger.error(
-                "Garmin token is expired or invalid (%s). "
-                "Regenerate tokens using: garmin-mcp-auth",
-                e,
-            )
-            sys.exit(1)
-        _log_token_expiry(garmin)
-        logger.info("Garmin Connect client initialized successfully.")
-        return garmin
-
-    logger.error(
-        "No Garmin credentials found. "
-        "Set GARMINTOKENS_BASE64 or mount a token directory at ~/.garminconnect."
-    )
-    sys.exit(1)
+    try:
+        return initialize_garmin(is_cn=is_cn)
+    except (GarminConnectAuthenticationError, GarminConnectConnectionError,
+            GarminConnectTooManyRequestsError, TokenStoreError) as exc:
+        logger.error("%s", safe_error(exc))
+        sys.exit(1)
 
 
 async def _serve(mcp_app: FastMCP) -> None:
@@ -397,6 +326,7 @@ async def _serve(mcp_app: FastMCP) -> None:
         host="0.0.0.0",
         port=int(os.getenv("PORT", 8000)),
         log_level="info",
+        access_log=False,  # OAuth callback URLs contain one-time credentials
     )
     await uvicorn.Server(config).serve()
 

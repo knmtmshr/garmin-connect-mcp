@@ -41,16 +41,18 @@ def main() -> None:
     b64 = base64.b64encode(token_json.encode()).decode()
 
     output_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "token.txt")
-    with open(output_file, "w") as f:
+    fd = os.open(output_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.chmod(output_file, 0o600)
+    with os.fdopen(fd, "w") as f:
         f.write(b64)
 
     print(f"\n✓ Token saved to: {output_file}")
     print("\nNext steps:")
     print("  Token directory:  base64 -d < token.txt > <token-dir>/garmin_tokens.json")
     print("  or env variable:  paste the contents of token.txt into GARMINTOKENS_BASE64")
-    print("  Then restart the server (see README → Garmin token renewal).")
-    print("\nTokens auto-refresh while the server runs regularly.")
-    print("Re-run this script if the server has been offline for months.")
+    print("  Then restart the server (see README → Manual reauthentication).")
+    print("\nTokens refresh on API calls; configure Upstash to preserve rotations on Render.")
+    print("Re-run only when reauthentication is required; follow README for an existing Redis record.")
     print("\n⚠️  Delete token.txt after pasting — it contains sensitive credentials.")
 
 

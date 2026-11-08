@@ -118,8 +118,9 @@ Then provide the token to the server in one of two ways:
   mkdir -p ./garmin-tokens && base64 -d < token.txt > ./garmin-tokens/garmin_tokens.json
   ```
 - **Environment variable:** paste the contents of `token.txt` into
-  `GARMINTOKENS_BASE64`. Simpler, but refreshed tokens are not persisted —
-  after a restart the server falls back to the original token.
+  `GARMINTOKENS_BASE64`. On Render, configure Upstash as described below so
+  refreshed tokens survive restarts. Without Upstash, this value remains a
+  fixed bootstrap and updated tokens are lost when the process stops.
 
 Delete `token.txt` afterwards — it contains your Garmin session.
 
@@ -150,14 +151,15 @@ In your MCP-compatible AI assistant, add this server as a remote MCP connection:
 
 | Env var | Required | Rotates | Description |
 |---|---|---|---|
-| `GARMINTOKENS_BASE64` | — | ~90 days | Garmin session token (from `generate_token.py`); not needed when a token directory is mounted |
+| `GARMINTOKENS_BASE64` | — | Bootstrap only | Base64 DI session JSON from `generate_token.py`, used only when no Garmin Redis record exists |
+| `GARMIN_TOKEN_STORE_KEY` | — | Never | Dedicated Garmin Redis key (default `mcp:garmin:credentials`); must differ from `TOKEN_STORE_KEY` |
 | `GITHUB_CLIENT_ID` | ✅ | Never | GitHub OAuth App client ID |
 | `GITHUB_CLIENT_SECRET` | ✅ | Never | GitHub OAuth App client secret |
 | `GITHUB_ALLOWED_USER_ID` | ✅ | Never | Immutable numeric GitHub user ID allowed to connect (preferred) |
 | `GITHUB_ALLOWED_USER` | — | Never | GitHub username — legacy fallback, used only if `GITHUB_ALLOWED_USER_ID` is unset |
 | `SERVER_URL` | ✅ | Never | Public base URL of this service |
 | `TOKEN_STORE_FILE` | ✅* | Never | Path of the OAuth token store file (in a mounted volume); takes precedence over Redis |
-| `UPSTASH_REDIS_REST_URL` | ✅* | Never | Upstash Redis REST endpoint (alternative to `TOKEN_STORE_FILE`) |
+| `UPSTASH_REDIS_REST_URL` | ✅* | Never | HTTPS REST endpoint, used for Garmin persistence and, unless a file store is set, Claude OAuth |
 | `UPSTASH_REDIS_REST_TOKEN` | ✅* | Never | Upstash Redis REST token |
 | `TOKEN_STORE_KEY` | — | Never | Redis key for the OAuth token store (default `mcp:garmin:token_store`) |
 | `PORT` | — | Never | Listen port inside the container (default `8000`) |
@@ -169,31 +171,72 @@ In your MCP-compatible AI assistant, add this server as a remote MCP connection:
 \* Set either `TOKEN_STORE_FILE` or both Upstash variables. Without either, tokens
 are kept in memory only and every restart requires reconnecting the AI assistant.
 
-## Garmin token renewal (~every 90 days)
+## Garmin token persistence on Render Free
 
-The server logs the exact token expiry date at every startup. Check the
-container logs (`docker logs <container>`) for lines like:
+Render Free has an ephemeral filesystem and cannot attach a persistent disk.
+Use the existing Upstash database with separate keys for the two kinds of token:
 
-```
-Garmin refresh token valid until 2026-08-15 (84 days).
-Garmin refresh token expires in 12 day(s) on 2026-06-03 — regenerate GARMINTOKENS_BASE64 soon.
-Garmin refresh token has EXPIRED — all API calls will fail. Regenerate GARMINTOKENS_BASE64.
-```
+| Setting | Purpose |
+|---|---|
+| `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` | Existing database REST connection; token must allow GET and SET |
+| `TOKEN_STORE_KEY` | Claude OAuth state; keep its current value (default `mcp:garmin:token_store`) |
+| `GARMIN_TOKEN_STORE_KEY` | Garmin DI credentials; default `mcp:garmin:credentials` |
+| `GARMINTOKENS_BASE64` | Initial seed only, generated with the pinned `garminconnect==0.3.6` |
 
-When the token needs renewal:
+On Render Free, leave `TOKEN_STORE_FILE` unset: a local file would override Redis
+for Claude OAuth and disappear when the service restarts. It does not override
+Redis for Garmin credentials. Keep these values in Render Environment settings,
+never in source control or chat. The database contains bearer credentials;
+restrict access to its REST token and use a separate Garmin key for each service
+and Garmin account, including previews. Do not let two instances rotate the same
+Garmin session concurrently: the lock is per process, not distributed.
 
-```bash
-cd /path/to/garmin-connect-mcp   # must be in this folder
-~/.local/bin/uv run --python 3.12 python generate_token.py
-```
+At startup, the server reads the Garmin key first. Only an absent key permits
+bootstrap from the environment (or the local token file). A store outage or
+invalid saved record stops startup rather than silently restoring an old token.
+The bootstrap is saved before the first API call. DI token rotation is saved
+immediately, even if a later profile request fails. Unchanged state causes no
+Redis write. GET/SET failures have one bounded transport retry; a failed save
+keeps the new state in memory, and the next call retries the save before making
+another Garmin request. Application code adds no replay of Garmin writes; the
+pinned library retains its existing HTTP-401 retry behavior.
 
-1. Replace the token the same way you provided it in Step 3 (token directory or
-   `GARMINTOKENS_BASE64`)
-2. Restart the container (`docker restart <container>`; if you changed `.env`,
-   recreate it — a plain restart does not re-read env files with Docker Compose)
-3. Delete `token.txt`
+The server reports access-token expiry when available; **refresh-token expiry is
+unknown**. Version 0.3.6 uses native DI tokens, not the older Garth OAuth format.
+There is no background refresh while Render is spun down. Restart recovery can
+refresh a still-valid session on demand; this cannot revive a revoked/expired
+refresh token or bypass MFA or Garmin anti-bot restrictions.
 
-Your AI assistant's configuration and GitHub OAuth are **not** affected.
+### Manual reauthentication, only when required
+
+1. Run `generate_token.py` locally using the project version as in Step 3.
+   Do not print or paste the token into a terminal log, issue, PR, or chat.
+2. With deployment approval, replace `GARMINTOKENS_BASE64` in Render's secret
+   settings and choose a **new, unused** `GARMIN_TOKEN_STORE_KEY`, distinct from
+   the Claude OAuth key. This intentionally bootstraps a fresh Garmin session
+   without overwriting or discarding the Claude OAuth store. Merely changing the
+   environment token does not override an existing Garmin record.
+3. Redeploy with approval, verify login, and delete `token.txt`. Remove obsolete
+   Garmin keys from Upstash when no instance uses them. Never delete the Claude
+   OAuth key as part of Garmin renewal.
+
+### Validation and operational limits
+
+`pytest tests/unit tests/integration` runs with mocked Garmin HTTP and Redis;
+it verifies rotation, restart restoration with a stale bootstrap, failure
+classification, pending-save recovery, and existing Claude OAuth persistence.
+It does not access your Garmin account or production Redis. After approving a
+production deployment, make a read-only MCP call, restart the service, then
+repeat the call with the original bootstrap unchanged. Inspect only fixed error
+codes and success metadata; never export the token record to logs.
+
+There is a small unavoidable gap between Garmin issuing a rotated token and
+Redis acknowledging it. A crash in this gap, an extended Redis outage, expired
+sessions, or loss/eviction of the Redis record may require manual reauthentication.
+Free tier limits, cold starts and provider changes remain applicable. OAuth
+callback access logging is disabled in the application so one-time codes are
+not included in Uvicorn request logs; infrastructure logging is managed by the
+hosting provider.
 
 ## Architecture
 
