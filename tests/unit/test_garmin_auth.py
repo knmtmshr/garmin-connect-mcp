@@ -70,6 +70,39 @@ def test_actual_refresh_survives_restart_with_stale_env(backend, api, monkeypatc
     assert json.loads(backend["mcp:garmin:credentials"])["di_refresh_token"] == "rotated"
 
 
+def test_ten_days_of_rotation_and_restarts_keep_latest_refresh_token(backend, api, monkeypatch):
+    """Regression for weekly failures: consumed refresh tokens cannot be reused.
+
+    Simulated elapsed time, real pinned client refresh path, fake Garmin HTTP.
+    Every day starts a fresh application client with the unchanged env seed.
+    """
+    clock = [time.time()]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    bootstrap(monkeypatch, tokens(clock[0] + 3600))
+    accepted_refresh = ["initial"]
+    refresh_count = [0]
+
+    def refresh(self, url, **kwargs):
+        assert kwargs["data"]["refresh_token"] == accepted_refresh[0]
+        refresh_count[0] += 1
+        accepted_refresh[0] = f"rotation-{refresh_count[0]}"
+        return Mock(ok=True, json=lambda: {
+            "access_token": jwt(clock[0] + 3600),
+            "refresh_token": accepted_refresh[0],
+        })
+
+    monkeypatch.setattr(Client, "_http_post", refresh)
+    for day in range(10):
+        if day:
+            clock[0] += 86400
+        restarted = initialize_garmin()
+        restarted.client.connectapi("/test-read")
+        assert restarted.client.di_refresh_token == accepted_refresh[0]
+        assert json.loads(backend["mcp:garmin:credentials"])["di_refresh_token"] == accepted_refresh[0]
+
+    assert refresh_count[0] == 9
+
+
 def test_runtime_rotation_saved_before_profile_failure(backend, api, monkeypatch):
     bootstrap(monkeypatch, tokens(time.time() + 3600))
     garmin = initialize_garmin()
